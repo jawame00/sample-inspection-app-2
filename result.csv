@@ -1,0 +1,4 @@
+sample_id,value,law,standard,is_exceeded
+A001,0.12,A,0.1,True
+A002,0.05,A,0.1,False
+A003,0.2,B,0.15,True
