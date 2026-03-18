@@ -1,3 +1,6 @@
 law,standard
-A,0.10
-B,0.15
+lead,0.10
+arsenic,0.05
+cadmium,0.03
+mercury,0.005
+chromium,0.20

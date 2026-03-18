@@ -4,7 +4,9 @@ from tkinter import ttk
 import pandas as pd
 import sqlite3
 from datetime import datetime
-
+import matplotlib.pyplot as plt
+import japanize_matplotlib
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 def init_db():
     conn = sqlite3.connect("inspection.db")
@@ -38,8 +40,12 @@ def process_csv(samples_path, standards_path, output_path="result.csv"):
     merged["is_exceeded"] = merged["value"] > merged["standard"]
     merged.to_csv(output_path, index=False)
 
-    # sample_id ごとに超過数・総項目数を集計
-    summary = merged.groupby("sample_id").agg(
+    # 通常検体とコントロールサンプルを分離する
+    df_sample = merged[merged["sample_type"] == "sample"]
+    df_control = merged[merged["sample_type"] == "control"]
+
+    # 通常検体のみで集計する
+    summary = df_sample.groupby("sample_id").agg(
         超過数=("is_exceeded", "sum"),
         総項目数=("is_exceeded", "count")
     ).reset_index()
@@ -47,8 +53,7 @@ def process_csv(samples_path, standards_path, output_path="result.csv"):
         lambda x: "不合格" if x > 0 else "合格"
     )
 
-    return merged, summary
-
+    return merged, summary, df_control
 
 def select_samples():
     path = filedialog.askopenfilename(
@@ -66,8 +71,8 @@ def select_standards():
     standards_var.set(path)
 
 
-# 検索ボタン押下時に result にアクセスできるようグローバルで保持
-current_result = None
+current_result = None   # 検索ボタン押下時に result にアクセスできるようグローバルで保持
+current_control = None  # 管理図用にコントロールサンプルを保持
 
 
 def run_process():
@@ -79,10 +84,13 @@ def run_process():
         return
 
     try:
-        result, summary = process_csv(samples_path, standards_path)
+        result, summary, df_control = process_csv(samples_path, standards_path)
 
         global current_result
         current_result = result
+
+        global current_control
+        current_control = df_control
 
         # commitの前にmessageboxを挟まないよう先に保存する
         save_log(len(result), int(result["is_exceeded"].sum()))
@@ -137,6 +145,187 @@ def show_search(df):
         tag = "ng" if row["is_exceeded"] else "ok"
         tree.insert("", "end", values=list(row), tags=(tag,))
 
+
+def show_monthly_chart():
+    # logsテーブルから月ごとの件数を集計して棒グラフを表示する
+    conn = sqlite3.connect("inspection.db")
+    df_log = pd.read_sql("SELECT * FROM logs", conn)
+    conn.close()
+
+    if df_log.empty:
+        messagebox.showinfo("情報", "ログデータがありません。先に判定実行してください。")
+        return
+
+    # 実行日時から「年月」を抽出して集計
+    df_log["年月"] = pd.to_datetime(df_log["実行日時"]).dt.strftime("%Y-%m")
+    monthly = df_log.groupby("年月").agg(
+        実行回数=("総件数", "count"),    
+        平均総件数=("総件数", "mean"),
+        平均超過件数=("超過件数", "mean")
+    ).reset_index()
+
+    # グラフウィンドウを作成
+    fig, ax = plt.subplots(figsize=(9, 4))
+    x = range(len(monthly))
+    width = 0.25
+
+    ax.bar([i - width for i in x], monthly["実行回数"],
+       width=width, label="実行回数", color="#7F77DD")
+    ax.bar([i for i in x], monthly["平均総件数"],
+       width=width, label="平均総件数", color="#5DCAA5")
+    ax.bar([i + width for i in x], monthly["平均超過件数"],
+       width=width, label="平均超過件数", color="#F0997B")
+
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(monthly["年月"], rotation=45)
+    ax.set_title("月ごとの分析状況")
+    ax.set_ylabel("件数・回数")
+    ax.legend()
+    plt.tight_layout()
+
+    # 新しいウィンドウに表示
+    chart_window = tk.Toplevel(root)
+    chart_window.title("月次分析グラフ")
+    canvas = FigureCanvasTkAgg(fig, master=chart_window)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill="both", expand=True)
+
+def show_trend_chart():
+    # 超過率の月次推移を折れ線グラフで表示する
+    conn = sqlite3.connect("inspection.db")
+    df_log = pd.read_sql("SELECT * FROM logs", conn)
+    conn.close()
+
+    if df_log.empty:
+        messagebox.showinfo("情報", "ログデータがありません。先に判定実行してください。")
+        return
+
+    # 月ごとに超過率を計算する
+    df_log["年月"] = pd.to_datetime(df_log["実行日時"]).dt.strftime("%Y-%m")
+    monthly = df_log.groupby("年月").agg(
+        総件数=("総件数", "sum"),
+        超過件数=("超過件数", "sum")
+    ).reset_index()
+
+    # 超過率（%）を計算する
+    monthly["超過率"] = (monthly["超過件数"] / monthly["総件数"] * 100).round(1)
+
+    # グラフを作成する
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    ax.plot(monthly["年月"], monthly["超過率"],
+            marker="o", color="#D85A30", linewidth=2, label="超過率(%)")
+
+    # 警告ラインを引く（20%を超えたら要注意）
+    ax.axhline(y=20, color="#FA7517", linestyle="--",
+               linewidth=1, label="注意ライン(20%)")
+
+    ax.set_title("超過率の月次推移")
+    ax.set_ylabel("超過率(%)")
+    ax.set_ylim(0, 100)
+    ax.legend()
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+
+    chart_window = tk.Toplevel(root)
+    chart_window.title("超過率トレンドグラフ")
+    canvas = FigureCanvasTkAgg(fig, master=chart_window)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill="both", expand=True)
+
+def show_item_chart():
+    # 項目別超過割合を横棒グラフで表示する
+    if current_result is None:
+        messagebox.showinfo("情報", "先に判定実行してください。")
+        return
+
+    # 項目ごとに総件数と超過件数を集計する
+    df = current_result.groupby("law").agg(
+        総件数=("is_exceeded", "count"),
+        超過件数=("is_exceeded", "sum")
+    ).reset_index()
+
+    # 超過率を計算する
+    df["超過率"] = (df["超過件数"] / df["総件数"] * 100).round(1)
+    df = df.sort_values("超過率", ascending=True)
+
+    # 横棒グラフを作成する
+    fig, ax = plt.subplots(figsize=(8, max(3, len(df) * 0.6)))
+
+    bars = ax.barh(df["law"], df["超過率"],
+                   color="#7F77DD", alpha=0.8)
+
+    # 各バーに超過率の数値を表示する
+    for bar, val in zip(bars, df["超過率"]):
+        ax.text(bar.get_width() + 0.5, bar.get_y() + bar.get_height() / 2,
+                f"{val}%", va="center", fontsize=10)
+
+    ax.set_title("項目別超過率")
+    ax.set_xlabel("超過率(%)")
+    ax.set_xlim(0, 110)
+    plt.tight_layout()
+
+    chart_window = tk.Toplevel(root)
+    chart_window.title("項目別超過率グラフ")
+    canvas = FigureCanvasTkAgg(fig, master=chart_window)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill="both", expand=True)
+
+def show_control_chart():
+    # コントロールサンプルの管理図を表示する
+    if current_control is None or current_control.empty:
+        messagebox.showinfo("情報", "先に判定実行してください。")
+        return
+
+    laws = current_control["law"].unique()
+    fig, axes = plt.subplots(len(laws), 1,
+                             figsize=(8, max(4, len(laws) * 2)))
+
+    # 項目が1つの場合はaxesをリストにする
+    if len(laws) == 1:
+        axes = [axes]
+
+    for ax, law in zip(axes, laws):
+        df = current_control[current_control["law"] == law]
+        standard = df["standard"].iloc[0]
+
+        # 管理限界線を計算する（基準値±20%）
+        ucl = standard * 1.20  # 上方管理限界
+        lcl = standard * 0.80  # 下方管理限界
+
+        ax.plot(df.index, df["value"],
+                marker="o", color="#7F77DD",
+                linewidth=2, label="測定値")
+
+        # 基準値ライン
+        ax.axhline(y=standard, color="#1D9E75",
+                   linestyle="-", linewidth=1.5, label=f"基準値({standard})")
+
+        # 上方管理限界ライン
+        ax.axhline(y=ucl, color="#E24B4A",
+                   linestyle="--", linewidth=1, label=f"UCL({ucl:.3f})")
+
+        # 下方管理限界ライン
+        ax.axhline(y=lcl, color="#BA7517",
+                   linestyle="--", linewidth=1, label=f"LCL({lcl:.3f})")
+
+        # 管理限界を外れた点を赤くする
+        for idx, row in df.iterrows():
+            if row["value"] > ucl or row["value"] < lcl:
+                ax.plot(idx, row["value"],
+                        marker="o", color="#E24B4A", markersize=10)
+
+        ax.set_title(f"{law} 管理図")
+        ax.set_ylabel("測定値")
+        ax.legend(fontsize=8)
+
+    plt.tight_layout()
+
+    chart_window = tk.Toplevel(root)
+    chart_window.title("コントロールサンプル管理図")
+    canvas = FigureCanvasTkAgg(fig, master=chart_window)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill="both", expand=True)
 
 def search():
     if current_result is None:
@@ -198,6 +387,10 @@ tk.Label(frame_search_input, text="  law:").pack(side="left")
 tk.Entry(frame_search_input, textvariable=search_law_var, width=12).pack(side="left")
 tk.Checkbutton(frame_search_input, text="超過のみ", variable=exceeded_var).pack(side="left")
 tk.Button(frame_search_input, text="検索", command=search).pack(side="left", padx=8)
+tk.Button(frame_search_input, text="月次グラフ", command=show_monthly_chart).pack(side="left", padx=8)
+tk.Button(frame_search_input, text="超過率トレンド", command=show_trend_chart).pack(side="left", padx=8)
+tk.Button(frame_search_input, text="項目別超過率", command=show_item_chart).pack(side="left", padx=8)
+tk.Button(frame_search_input, text="管理図", command=show_control_chart).pack(side="left", padx=8)
 
 frame_search = tk.Frame(root)
 frame_search.grid(row=6, column=0, columnspan=3, padx=5, pady=5, sticky="nsew")
